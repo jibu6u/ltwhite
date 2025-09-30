@@ -3,11 +3,10 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>WebXR Dual Color • v17.5 • Soft Rounded Boxes (4–6 at once)</title>
+<title>WebXR Dual Color • v17.5 • Soft Boxes (safe, 4–6 at once)</title>
 <style>
   *{box-sizing:border-box}
   html,body{margin:0;height:100%;background:#000;font-family:system-ui,-apple-system,Segoe UI,Roboto,"Noto Sans KR",sans-serif}
-  /* z-order: renderer(0) < VRButton(6000) < seedCanvas(400) < HUD(800) < controls/hamburger(7000) */
   #seedCanvas{position:fixed;inset:0;z-index:400;cursor:crosshair;touch-action:none;display:block;pointer-events:auto}
   #seedHelp{position:fixed;left:50%;top:18%;transform:translateX(-50%);
     background:rgba(0,0,0,.6);color:#fff;padding:10px 14px;border-radius:10px;font:13px/1.4 ui-monospace,Consolas,monospace;z-index:450}
@@ -31,6 +30,9 @@
   .radios{display:flex;gap:16px;align-items:center}
   .radios label{display:flex;gap:6px;align-items:center;font-size:12px}
   small.hint{opacity:.8}
+  /* 오류 표시 */
+  #err{position:fixed;left:12px;top:60px;z-index:9000;color:#fff;background:#b00020;padding:6px 10px;border-radius:8px;
+       font:12px ui-monospace,Consolas,monospace;display:none;max-width:70vw;white-space:pre-line}
 </style>
 </head>
 <body>
@@ -87,11 +89,15 @@
   </div>
 
   <div id="hud">seed: — | XR:OFF | run:false | seedMode:true | rec:OFF | L:#000000 R:#000000 | boxes:0</div>
+  <div id="err"></div>
 
 <script type="module">
+/* ---- 런타임 오류를 화면에 표시(원인 추적용) ---- */
+const errBox=document.getElementById('err');
+window.addEventListener('error', e=>{ errBox.style.display='block'; errBox.textContent='오류: '+e.message; });
+
 import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
 import { VRButton } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/webxr/VRButton.js';
-import { RoundedBoxGeometry } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/geometries/RoundedBoxGeometry.js';
 
 const $=id=>document.getElementById(id), hud=$('hud');
 
@@ -171,7 +177,6 @@ function applyFromBase(){
 /* ===== THREE/WebXR 설정 ===== */
 const renderer=new THREE.WebGLRenderer({antialias:true,alpha:false});
 renderer.outputColorSpace = THREE.SRGBColorSpace;
-renderer.physicallyCorrectLights = true;
 renderer.setPixelRatio(Math.min(devicePixelRatio||1,1.8));
 renderer.setSize(innerWidth,innerHeight);
 renderer.xr.enabled=true; renderer.xr.setReferenceSpaceType('local-floor');
@@ -182,10 +187,10 @@ const scene=new THREE.Scene();
 const cam=new THREE.PerspectiveCamera(60,innerWidth/innerHeight,0.01,20);
 scene.add(cam);
 
-/* 라이트(부드러운 음영) */
-const hemi = new THREE.HemisphereLight(0xffffff, 0x202040, 1.0);
-const dir1 = new THREE.DirectionalLight(0xffffff, 1.1); dir1.position.set( 1, 1.2,  1.5);
-const dir2 = new THREE.DirectionalLight(0xffffff, 0.6); dir2.position.set(-1,-0.6, -0.5);
+/* 부드러운 음영용 라이트 */
+const hemi = new THREE.HemisphereLight(0xffffff, 0x202040, 1.1);
+const dir1 = new THREE.DirectionalLight(0xffffff, 1.0); dir1.position.set( 1.2, 1.2,  1.6);
+const dir2 = new THREE.DirectionalLight(0xffffff, 0.5); dir2.position.set(-1.0,-0.6, -0.6);
 scene.add(hemi, dir1, dir2);
 
 /* 카메라 레이어: 미러 보기용으로 1,2 둘 다 허용 */
@@ -202,18 +207,18 @@ quadL.layers.set(1); quadR.layers.set(2);
 quadL.renderOrder = 0; quadR.renderOrder = 0;
 cam.add(quadL); cam.add(quadR);
 
-/* ===== 부드러운 둥근 박스(4–6개) ===== */
+/* ===== 직육면체(4–6개) — 테두리선 없이 소프트 음영 ===== */
 const BOX_MIN = 4, BOX_MAX = 6;
 const ACTIVE_COUNT = Math.floor(Math.random()*(BOX_MAX-BOX_MIN+1))+BOX_MIN; // 4~6
 const Z_START_MIN = -12.0, Z_START_MAX = -6.0;
 const Z_NEAR = -0.35;
-const XY_SPREAD = 0.28;           // 중심 근처로 모으기
-const SPEED_MIN = 0.8, SPEED_MAX = 1.7;
+const XY_SPREAD = 0.28;
+const SPEED_MIN = 0.8, SPEED_MAX = 1.6;
 const ROT_MIN = 0.3, ROT_MAX = 0.9;
-const OPACITY_MIN = 0.5, OPACITY_MAX = 0.9;
+const OPACITY_MIN = 0.55, OPACITY_MAX = 0.95;
 
 const boxes=[];
-const boxGroup = new THREE.Group(); // 카메라 기준 앞에서 움직임
+const boxGroup = new THREE.Group();
 boxGroup.renderOrder = 2;
 boxGroup.layers.enable(1); boxGroup.layers.enable(2);
 cam.add(boxGroup);
@@ -221,16 +226,11 @@ cam.add(boxGroup);
 function rand(a,b){ return a + (b-a)*((state.rng?state.rng():Math.random())); }
 
 function spawnOne(){
-  // 크기 다양화
+  // 크기
   const sx = rand(0.28, 0.9);
   const sy = rand(0.22, 0.7);
   const sz = rand(0.45, 1.35);
-
-  // 둥근 모서리 반경 (너무 크게 잡지 않기)
-  const radius = Math.min(sx, sy, sz) * 0.18; // 전체의 ~18%
-  const smooth = 4;                            // 세분(부드러움)
-
-  const geo = new RoundedBoxGeometry(sx, sy, sz, radius, smooth);
+  // 표면을 더 부드럽게 보이게 하는 기본 재질(선 없음)
   const mat = new THREE.MeshStandardMaterial({
     color: 0xffffff,
     roughness: 0.42,
@@ -238,7 +238,7 @@ function spawnOne(){
     transparent: true,
     opacity: rand(OPACITY_MIN, OPACITY_MAX)
   });
-
+  const geo = new THREE.BoxGeometry(sx, sy, sz);
   const mesh = new THREE.Mesh(geo, mat);
   mesh.layers.enable(1); mesh.layers.enable(2);
   respawn(mesh, true);
@@ -363,14 +363,14 @@ function startRecording(){
   if(!MediaRecorder.isTypeSupported(mime)) mime='video/webm;codecs=vp8';
   if(!MediaRecorder.isTypeSupported(mime)) mime='video/webm';
 
-  const stream = slot.canvas.captureStream(fps);
+  const stream = slot.canvas.captureStream(Number($('recFps').value)||30);
   slot.mr = new MediaRecorder(stream, { mimeType: mime });
   slot.chunks=[]; slot.startAt=Date.now();
   slot.mr.ondataavailable = e=>{ if(e.data.size) slot.chunks.push(e.data); };
   slot.mr.onstop = ()=> downloadBlob(new Blob(slot.chunks,{type:mime}),
                                      `${rec.target==='L'?'left':'right'}_${new Date(slot.startAt).toISOString().replace(/[:.]/g,'-')}.webm`);
   slot.mr.start();
-  const intv = Math.max(16, Math.round(1000/fps));
+  const intv = Math.max(16, Math.round(1000/(Number($('recFps').value)||30)));
   slot.timer = setInterval(()=>drawRecFrame(rec.target), intv);
   updateHUD();
 }
