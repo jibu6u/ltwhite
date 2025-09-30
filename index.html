@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>WebXR Dual Color • v17.5 • Multi White Boxes (Start/Stop fixed)</title>
+<title>WebXR Dual Color • v17.5 • Soft Rounded Boxes (4–6 at once)</title>
 <style>
   *{box-sizing:border-box}
   html,body{margin:0;height:100%;background:#000;font-family:system-ui,-apple-system,Segoe UI,Roboto,"Noto Sans KR",sans-serif}
@@ -91,10 +91,11 @@
 <script type="module">
 import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
 import { VRButton } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/webxr/VRButton.js';
+import { RoundedBoxGeometry } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/geometries/RoundedBoxGeometry.js';
 
 const $=id=>document.getElementById(id), hud=$('hud');
 
-/* ===== 공통 UI 값 포맷 ===== */
+/* ===== 포맷터 ===== */
 const fmt={pct:v=>`${v}%`, times:v=>`${(v/100).toFixed(2)}×`, secs:v=>`${v|0}s`, lift:v=> (v>=0?`+${(v/100).toFixed(2)}`:`${(v/100).toFixed(2)}`), fps:v=>`${v|0}fps` };
 const bindVal=(id,fmtf)=>{ const r=$(id), out=$(id+'Val'); const apply=()=>out.textContent=fmtf(Number(r.value)); r.addEventListener('input',apply); apply(); };
 ['gainL','gainR'].forEach(id=>bindVal(id,fmt.pct));
@@ -116,8 +117,8 @@ function drawPts(){
     for(let k=0;k<7;k++){i=(i+2)%7;ctx.lineTo(state.points[i].x,state.points[i].y);}ctx.closePath();ctx.stroke();}
 }
 function rel(e){const r=can.getBoundingClientRect();const p=(e.touches?e.touches[0]:e);return {x:p.clientX-r.left,y:p.clientY-r.top};}
-let lock=0,last={x:-1e9,y:-1e9};
-function addPt(p){ if(!seedMode) return; const dx=p.x-last.x,dy=p.y-last.y;if(dx*dx+dy*dy<25)return;if(state.points.length>=7)return;state.points.push(p);last=p;drawPts(); }
+let lock=0,lastPt={x:-1e9,y:-1e9};
+function addPt(p){ if(!seedMode) return; const dx=p.x-lastPt.x,dy=p.y-lastPt.y;if(dx*dx+dy*dy<25)return;if(state.points.length>=7)return;state.points.push(p);lastPt=p;drawPts(); }
 function onDown(e){
   const cx=(e.clientX||e.touches?.[0]?.clientX), cy=(e.clientY||e.touches?.[0]?.clientY);
   const el = document.elementFromPoint(cx, cy);
@@ -167,9 +168,10 @@ function applyFromBase(){
   updateHUD();
 }
 
-/* ===== THREE/WebXR 기본 ===== */
+/* ===== THREE/WebXR 설정 ===== */
 const renderer=new THREE.WebGLRenderer({antialias:true,alpha:false});
 renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.physicallyCorrectLights = true;
 renderer.setPixelRatio(Math.min(devicePixelRatio||1,1.8));
 renderer.setSize(innerWidth,innerHeight);
 renderer.xr.enabled=true; renderer.xr.setReferenceSpaceType('local-floor');
@@ -179,6 +181,12 @@ document.body.appendChild(renderer.domElement);
 const scene=new THREE.Scene();
 const cam=new THREE.PerspectiveCamera(60,innerWidth/innerHeight,0.01,20);
 scene.add(cam);
+
+/* 라이트(부드러운 음영) */
+const hemi = new THREE.HemisphereLight(0xffffff, 0x202040, 1.0);
+const dir1 = new THREE.DirectionalLight(0xffffff, 1.1); dir1.position.set( 1, 1.2,  1.5);
+const dir2 = new THREE.DirectionalLight(0xffffff, 0.6); dir2.position.set(-1,-0.6, -0.5);
+scene.add(hemi, dir1, dir2);
 
 /* 카메라 레이어: 미러 보기용으로 1,2 둘 다 허용 */
 cam.layers.enable(1); cam.layers.enable(2);
@@ -194,69 +202,60 @@ quadL.layers.set(1); quadR.layers.set(2);
 quadL.renderOrder = 0; quadR.renderOrder = 0;
 cam.add(quadL); cam.add(quadR);
 
-/* ===== 여러 개의 하얀 직육면체 풀 ===== */
-const BOX_COUNT = 48;            // 박스 개수
+/* ===== 부드러운 둥근 박스(4–6개) ===== */
+const BOX_MIN = 4, BOX_MAX = 6;
+const ACTIVE_COUNT = Math.floor(Math.random()*(BOX_MAX-BOX_MIN+1))+BOX_MIN; // 4~6
 const Z_START_MIN = -12.0, Z_START_MAX = -6.0;
 const Z_NEAR = -0.35;
-const XY_SPREAD = 0.6;           // 중심 주변 분포
-const SPEED_MIN = 0.8, SPEED_MAX = 2.0;
-const ROT_MIN = 0.4, ROT_MAX = 1.2;
-const OPACITY_MIN = 0.35, OPACITY_MAX = 0.85;
+const XY_SPREAD = 0.28;           // 중심 근처로 모으기
+const SPEED_MIN = 0.8, SPEED_MAX = 1.7;
+const ROT_MIN = 0.3, ROT_MAX = 0.9;
+const OPACITY_MIN = 0.5, OPACITY_MAX = 0.9;
 
 const boxes=[];
-const boxGroup = new THREE.Group(); // 카메라 기준 앞에 붙여 이동
+const boxGroup = new THREE.Group(); // 카메라 기준 앞에서 움직임
 boxGroup.renderOrder = 2;
 boxGroup.layers.enable(1); boxGroup.layers.enable(2);
 cam.add(boxGroup);
 
-function rand(a,b){ return a + (b-a)*(state.rng?state.rng():Math.random()); }
-function spawnOne(target){
-  // 크기 다양화
-  const sx = rand(0.25, 0.85);
-  const sy = rand(0.20, 0.70);
-  const sz = rand(0.40, 1.30);
-  const geo = new THREE.BoxGeometry(sx, sy, sz);
+function rand(a,b){ return a + (b-a)*((state.rng?state.rng():Math.random())); }
 
-  const mat = new THREE.MeshBasicMaterial({
+function spawnOne(){
+  // 크기 다양화
+  const sx = rand(0.28, 0.9);
+  const sy = rand(0.22, 0.7);
+  const sz = rand(0.45, 1.35);
+
+  // 둥근 모서리 반경 (너무 크게 잡지 않기)
+  const radius = Math.min(sx, sy, sz) * 0.18; // 전체의 ~18%
+  const smooth = 4;                            // 세분(부드러움)
+
+  const geo = new RoundedBoxGeometry(sx, sy, sz, radius, smooth);
+  const mat = new THREE.MeshStandardMaterial({
     color: 0xffffff,
+    roughness: 0.42,
+    metalness: 0.0,
     transparent: true,
-    opacity: rand(OPACITY_MIN, OPACITY_MAX),
+    opacity: rand(OPACITY_MIN, OPACITY_MAX)
   });
+
   const mesh = new THREE.Mesh(geo, mat);
   mesh.layers.enable(1); mesh.layers.enable(2);
-  mesh.position.set(rand(-XY_SPREAD,XY_SPREAD), rand(-XY_SPREAD,XY_SPREAD), rand(Z_START_MIN, Z_START_MAX));
-  mesh.rotation.set(rand(0,Math.PI), rand(0,Math.PI), rand(0,Math.PI));
-  mesh.userData.vz = rand(SPEED_MIN, SPEED_MAX);
-  mesh.userData.vr = new THREE.Vector3(rand(ROT_MIN,ROT_MAX), rand(ROT_MIN,ROT_MAX), rand(ROT_MIN,ROT_MAX));
-
-  // 엣지 라인(경계 강조)
-  const edges = new THREE.EdgesGeometry(geo, 30);
-  const edgeMat = new THREE.LineBasicMaterial({ color: 0x222222, transparent:true, opacity:0.55 });
-  const lines = new THREE.LineSegments(edges, edgeMat);
-  lines.layers.enable(1); lines.layers.enable(2);
-  mesh.add(lines);
-
-  if(target){
-    // 기존 메시에 재스폰 파라미터만 갱신
-    target.geometry.dispose();
-    target.children[0].geometry.dispose();
-    target.geometry.copy(geo);
-  }
-
+  respawn(mesh, true);
   return mesh;
 }
-function respawn(mesh){
+function respawn(mesh, first=false){
   mesh.position.set(rand(-XY_SPREAD,XY_SPREAD), rand(-XY_SPREAD,XY_SPREAD), rand(Z_START_MIN, Z_START_MAX));
   mesh.rotation.set(rand(0,Math.PI), rand(0,Math.PI), rand(0,Math.PI));
   mesh.material.opacity = rand(OPACITY_MIN, OPACITY_MAX);
   mesh.userData.vz = rand(SPEED_MIN, SPEED_MAX);
-  mesh.userData.vr.set(rand(ROT_MIN,ROT_MAX), rand(ROT_MIN,ROT_MAX), rand(ROT_MIN,ROT_MAX));
+  mesh.userData.vr = new THREE.Vector3(rand(ROT_MIN,ROT_MAX), rand(ROT_MIN,ROT_MAX), rand(ROT_MIN,ROT_MAX));
+  if(first) boxGroup.add(mesh);
 }
 function buildPool(){
-  // 초기에는 풀만 만들고, 움직이지 않음 → run=true가 되면 움직임 시작
-  for(let i=0;i<BOX_COUNT;i++){
+  for(let i=0;i<ACTIVE_COUNT;i++){
     const m = spawnOne();
-    boxGroup.add(m); boxes.push(m);
+    boxes.push(m);
   }
   updateHUD();
 }
@@ -301,7 +300,7 @@ $('stopBtn').onclick  = stopCycle;
 $('nextBtn').onclick  = ()=>{ if(!state.running && !state.rng) ensureRNG(); tickNext(); };
 $('resetBtn').onclick = ()=>{
   stopCycle(); state.points=[]; state.rng=null; state.lastHue=null; state.lastBase=null; setSeedMode(true); drawPts();
-  boxes.forEach(respawn); // 위치 초기화
+  boxes.forEach(m=>respawn(m)); // 위치 초기화
 };
 
 /* 유지시간/슬라이더 즉시 반영 */
@@ -417,8 +416,8 @@ renderer.setAnimationLoop((t)=>{
 });
 
 /* ===== 초기화 ===== */
-buildPool();          // 풀만 구성 (움직임 없음)
-applyFromBase();      // 초기 색 표시
+buildPool();          // 4~6개만 생성(정지 상태)
+applyFromBase();      // 초기 좌/우 배경색
 updateHUD();
 
 /* 반응형 */
